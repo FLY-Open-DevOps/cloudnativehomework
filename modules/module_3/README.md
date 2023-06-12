@@ -76,13 +76,13 @@ ok      module3 0.021s
 请求通过，说明容器中的服务已经正常启动
 
 进一步查看容器中打印的日志：
-···bash
+```bash
 $ docker logs serverdemo
 HTTP SERVER: 
         Path      : /healthz
         ClientIP  : 192.168.245.1:52600
         StatusCode: 200
-···
+```
 可以看到日志也随着单元测试的请求产生了，工作正常
 
 ### 4.通过 nsenter 进入容器查看 IP 配置
