@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: http-server-demo-dev
+  namespace: cloudnative
+data: 
+  config.yaml: |
+    env: DEV
+    maxseq: 40
+    cacheresult: true
+    port: 80
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: http-server-demo-prod
+  namespace: cloudnative
+data: 
+  config.yaml: |
+    env: PROD
+    maxseq: 40
+    cacheresult: true
+    port: 80

@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-server-demo-dev
+  namespace: cloudnative
+spec:
+  selector:
+    app: http-server-demo-dev
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-server-demo-prod
+  namespace: cloudnative
+spec:
+  selector:
+    app: http-server-demo-prod
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

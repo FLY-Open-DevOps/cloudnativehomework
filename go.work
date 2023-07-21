@@ -5,3 +5,5 @@ use ./modules/module_1/
 use ./modules/module_2
 
 use ./modules/module_3
+
+use ./modules/module_8

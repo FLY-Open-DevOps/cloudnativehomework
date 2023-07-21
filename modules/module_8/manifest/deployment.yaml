@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-server-demo-dev
+  namespace: cloudnative
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: http-server-demo-dev
+  template:
+    metadata:
+      labels:
+        app: http-server-demo-dev
+    spec:
+      containers:
+        - name: http-server-demo-dev
+          image: yuki:5000/http-server-demo:v0.0.3
+          command: ["/home/server", "--config=/home/config/config.yaml"]
+          ports:
+            - name: server-port
+              containerPort: 80
+          volumeMounts:
+          - name: config
+            mountPath: "/home/config"
+            readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /dev/healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /dev/healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap:
+            name: http-server-demo-dev
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-server-demo-prod
+  namespace: cloudnative
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: http-server-demo-prod
+  template:
+    metadata:
+      labels:
+        app: http-server-demo-prod
+    spec:
+      containers:
+        - name: http-server-demo-prod
+          image: yuki:5000/http-server-demo:v0.0.3
+          command: ["/home/server", "--config=/home/config/config.yaml"]
+          ports:
+            - name: server-port
+              containerPort: 80
+          volumeMounts:
+          - name: config
+            mountPath: "/home/config"
+            readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /prod/healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /prod/healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap:
+            name: http-server-demo-prod
