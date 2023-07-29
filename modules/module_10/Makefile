@@ -7,8 +7,8 @@ serve:
 
 .PHONY: build
 build:
-	docker build -t yuki:5000/http-server-demo:v0.0.3 .
-	docker push yuki:5000/http-server-demo:v0.0.3
+	docker build -t yuki:5000/http-server-demo:v0.0.4 .
+	docker push yuki:5000/http-server-demo:v0.0.4
 
 .PHONY: certgen
 certgen:

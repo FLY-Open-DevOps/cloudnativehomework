@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-server-demo
+  namespace: cloudnative
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-server-demo
+  template:
+    metadata:
+      labels:
+        app: http-server-demo
+      annotations:
+        prometheus.io/port: server-port
+        prometheus.io/scrape: "true"
+    spec:
+      containers:
+        - name: http-server-demo
+          image: yuki:5000/http-server-demo:v0.0.4
+          imagePullPolicy: Always
+          command: ["/home/server", "--config=/home/config/config.yaml"]
+          ports:
+            - name: server-port
+              containerPort: 80
+          volumeMounts:
+          - name: config
+            mountPath: "/home/config"
+            readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap:
+            name: http-server-demo
+

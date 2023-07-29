@@ -14,11 +14,12 @@ import (
 )
 
 type Server struct {
-	fibo   *FiboCaculator
-	port   int
-	logger *slog.Logger
-	mux    *http.ServeMux
-	srv    *http.Server
+	fibo        *FiboCaculator
+	port        int
+	logger      *slog.Logger
+	mux         *http.ServeMux
+	srv         *http.Server
+	middlewares []Middleware
 }
 
 func NewServer(cfg *Config) *Server {
@@ -35,6 +36,7 @@ func NewServer(cfg *Config) *Server {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 	s.logger = logger
 	s.fibo = NewFiboCaculator(cfg.MaxSeq, cfg.CacheResult, logger)
+	s.use(s.logging)
 	s.register(strings.ToLower(cfg.Env))
 	return s
 }
@@ -47,12 +49,24 @@ func (s *Server) Run() error {
 	return s.srv.ListenAndServe()
 }
 
+func (s *Server) use(m ...Middleware) {
+	s.middlewares = append(s.middlewares, m...)
+}
+
 func (s *Server) register(env string) {
 	if len(env) == 0 {
 		env = "prod"
 	}
-	s.mux.HandleFunc(fmt.Sprintf("/%s/healthz", env), s.logging(s.healthz).Wrap().ServeHTTP)
-	s.mux.HandleFunc(fmt.Sprintf("/%s/fibo", env), s.logging(s.fiboHandler).Wrap().ServeHTTP)
+	var healthz Handler = s.healthz
+	var fibo Handler = s.fiboHandler
+	for i := len(s.middlewares) - 1; i > -1; i -= 1 {
+		healthz = s.middlewares[i](healthz)
+		fibo = s.middlewares[i](fibo)
+	}
+	s.mux.Handle(fmt.Sprintf("/%s/healthz", env), healthz.Wrap())
+	s.mux.Handle(fmt.Sprintf("/%s/fibo", env), fibo.Wrap())
+	// s.mux.Handle(fmt.Sprintf("/%s/healthz", env), s.logging(s.healthz).Wrap())
+	// s.mux.Handle(fmt.Sprintf("/%s/fibo", env), s.logging(s.fiboHandler).Wrap())
 }
 
 func (s *Server) Stop(ctx context.Context) error {

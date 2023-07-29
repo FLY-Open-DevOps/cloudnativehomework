@@ -1,8 +1,7 @@
-package module8
+package module10
 
 import "net/http"
 
-type Middleware func(Handler) Handler
 type Handler func(*Response, *http.Request)
 
 func (h Handler) Wrap() http.Handler {
