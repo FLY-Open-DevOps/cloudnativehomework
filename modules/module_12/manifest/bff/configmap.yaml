@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bff-svc
+  namespace: cloudnative
+data: 
+  config.yaml: |
+    env: PROD
+    port: 80
+    caculatoraddr: http://caculator-svc.cloudnative.svc.cluster.local

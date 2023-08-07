@@ -1,0 +1,18 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bff-svc
+  namespace: cloudnative
+spec:
+  gateways:
+    - bff-svc
+  hosts:
+    - cloudnative.io
+  http:
+    - match:
+        - port: 443
+      route:
+        - destination:
+            host: bff-svc.cloudnative.svc.cluster.local
+            port:
+              number: 80

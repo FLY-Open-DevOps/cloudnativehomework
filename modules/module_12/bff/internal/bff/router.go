@@ -1,4 +1,4 @@
-package rest
+package bff
 
 import (
 	"context"

@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fibo-svc
+  namespace: cloudnative
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fibo-svc
+  template:
+    metadata:
+      labels:
+        app: fibo-svc
+      annotations:
+        prometheus.io/port: server-port
+        prometheus.io/scrape: "true"
+    spec:
+      containers:
+        - name: fibo-svc
+          image: yuki:5000/fibo-svc:v0.0.1
+          imagePullPolicy: Always
+          command: ["/home/server", "--config=/home/config/config.yaml"]
+          ports:
+            - name: server-port
+              containerPort: 80
+          volumeMounts:
+          - name: config
+            mountPath: "/home/config"
+            readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap:
+            name: fibo-svc
+

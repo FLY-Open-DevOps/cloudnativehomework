@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: caculator-svc
+  namespace: cloudnative
+data: 
+  config.yaml: |
+    env: PROD
+    port: 80
+    fiboaddr: http://fibo-svc.cloudnative.svc.cluster.local

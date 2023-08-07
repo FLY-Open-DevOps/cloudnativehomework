@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caculator-svc
+  namespace: cloudnative
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caculator-svc
+  template:
+    metadata:
+      labels:
+        app: caculator-svc
+      annotations:
+        prometheus.io/port: server-port
+        prometheus.io/scrape: "true"
+    spec:
+      containers:
+        - name: caculator-svc
+          image: yuki:5000/caculator-svc:v0.0.1
+          imagePullPolicy: Always
+          command: ["/home/server", "--config=/home/config/config.yaml"]
+          ports:
+            - name: server-port
+              containerPort: 80
+          volumeMounts:
+          - name: config
+            mountPath: "/home/config"
+            readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: server-port
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: config
+          configMap:
+            name: caculator-svc
+

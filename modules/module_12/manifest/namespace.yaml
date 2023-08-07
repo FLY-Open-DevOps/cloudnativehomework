@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  creationTimestamp: "2023-07-29T07:35:41Z"
+  labels:
+    kubernetes.io/metadata.name: cloudnative
+    istio-injection: enabled
+  name: cloudnative

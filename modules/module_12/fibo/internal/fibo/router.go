@@ -1,4 +1,4 @@
-package rest
+package fibo
 
 import (
 	"context"

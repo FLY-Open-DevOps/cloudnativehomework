@@ -1,0 +1,4 @@
+env: DEV
+maxseq: 40
+cacheresult: true
+port: 8082
