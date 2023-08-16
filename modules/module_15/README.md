@@ -210,7 +210,20 @@ APF实现以来两个资源
 
 
 #### apimachinery 
-TODO
+
+> 本小段主要涉及CRD和对应controller的开发（Operator模式）
+
+Group的定义：[kubernetes/pkg/apis/core/register.go](https://github.com/kubernetes/kubernetes/blob/master/pkg/apis/core/register.go)
+List
+单一对象的数据结构：详见[MetaData](#MetaData)
+想要去自定义对象的时候，可以使用[Code Generator](https://github.com/kubernetes/code-generator)，通过定义对象，以及标注特定的tag，通过code generator即可为对象生成kubernetes对象中的一些特定的方法，如deepCopy等
+
+etcd storage的实现：[kubernetes/pkg/registry/core/configmap/storage/storage.go](https://github.com/kubernetes/kubernetes/blob/master/pkg/registry/core/configmap/storage/storage.go)
+
+subresource
+内嵌在kubernets对象中，有独立的操作逻辑的属性集合，如pod status，pod status需要频繁更新，此时在podStatusStrategy里面可以定义更新pod status的时候用旧的pod spec覆盖掉新的pod spec保证更新pod status的时候不会改动到pod spec，避免了reversion的影响
+
+
 
 
 ### ETCD
@@ -222,7 +235,15 @@ Controller是用于管理每种对象的状态，确保集群中对象的真实�
 
 Controller Manager则是多个Controller的组合，每个Controller一直处于一个循环之中不断去监听它所负责的对象，当对象发生变化的时候完成配置，如果配置失败则不断重试，以能达到用户定义的期望状态
 
+Kubernetes中默认开启的通用的一些Controller，如：Deployment Controller, Job Controller, Service Controller等
+
+> Cloud Controller Manager，这些controller往往跟云厂商深度集成，因此被分离作为独立的Controller manager, 例如定制的IngressController，Service Controller等
+
+各个controller的启动源码：[kubernetes/cmd/kube-controller-manager/app/core.go](https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-controller-manager/app/core.go)
+
+
 #### Controller的工作原理
+
 Controller由两个核心的组件，分别是Informer和Lister
 * Lister
     Controller对于Kubernetes中的对象的一个缓存，通过Lister可以在本地通过key直接找到一个对象的当前状态，而不需要每次查询都需要跟API Server进行一次通信，减轻API Server的压力
@@ -230,18 +251,221 @@ Controller由两个核心的组件，分别是Informer和Lister
 * Informer
     被监听的对象的`增删改`操作都会以时间的形式通知到Informer，Informer将对象对应的key信息放入FIFO的work queue，等待worker协程或线程不断地从queue中取出，然后对对象进行相应的操作
 
-### Scheduler
-是一个特殊的Controller，职责是监控集群内所有没有进行调度的Pod，根据所有Worker Node的健康状态与资源使用情况，为Pod选择最佳的Node，完成调度
 
-调度分为Predict（过滤资源无法满足要求的Node），Priority（节点打分）和Bind（绑定节点）三个阶段，
+确保scheduler和controller的HA
+使用一个controller持续watch某个configmap和endpoint（kubernetes提供的leader election的类库）的annotation信息，leader会把自己的信息更新到endpoint的annotation上，并在一段时间内要回来renew，Lease对象
+
+
+### Scheduler
+是一个特殊的Controller，职责是监控集群内所有没有进行调度的Pod，根据所有Worker Node的健康状态与资源使用情况，为Pod选择最佳的Node，完成调度（更新Pod的NodeName字段）
+
+调度分为Predicate（过滤资源无法满足要求的Node），Priority（节点打分）和Bind（绑定节点）三个阶段
+
+#### Predicate
+Predicate根据一系列的策略（一些列的Predicate Plugins）来过滤资源无法满足的Node，策略包括端口冲突，计算资源是否满足（CPU,GPU,内存），NodeSelector是否匹配，亲和性策略，是否能容忍污点等，也可以自己定义策略
+
+在进入每一个策略插件计算完成后就过滤一部分节点，最后只剩下满足调度条件的节点列表
+
+#### Priority
+Priority根据一系列的策略（一些列的Priority Plugins）来为过滤后的每一个Node打分，策略包括Pod尽量分布在不同节点，亲和性，优先调度到请求资源少的节点，平衡各个节点资源使用等等
+
+#### Affinity
+
+##### NodeAffinity
+基于Label Selector去过滤不符合条件的Node，有nodeAffinity和nodeAntiAffinity
+
+主要有两种：
+* requiredDuringSchedulingIgnoredDuringExecution
+    硬亲和，一定要满足需求才会调度
+    ```yaml
+    spec:
+    affinity:
+        nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+            - key: disktype
+                operator: In
+                values:
+                - ssd 
+    ```
+* preferredDuringSchedulingIgnoredDuringExecution
+    软亲和，不满足的时候也可以作为备选节点，只是调度的权重可能会偏低
+    ```yaml
+    spec:
+    affinity:
+        nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+            preference:
+            matchExpressions:
+            - key: disktype
+                operator: In
+                values:
+                - ssd  
+    ```
+##### PodAffinity
+基于Label Selector去查看如果Node中是否含有符合条件的Pod，有podAffinity和podAntiAffinity
+* requiredDuringSchedulingIgnoredDuringExecution
+    硬亲和，一定要满足需求才会调度
+    ```yaml
+    spec:
+    affinity:
+        podAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+            - key: disktype
+                operator: In
+                values:
+                - ssd 
+            topologyKey: kubernetes.io/hostname
+    ```
+    > topologyKey 是Node的一个label，代表可用区，上面的例子表示要跟满足标签的Pod放置在`kubernetes.io/hostname`这一个可用区内
+
+* preferredDuringSchedulingIgnoredDuringExecution
+    软亲和，不满足的时候也可以作为备选节点，只是调度的权重可能会偏低
+    ```yaml
+    spec:
+    affinity:
+        podAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+            preference:
+            matchExpressions:
+            - key: disktype
+                operator: In
+                values:
+                - ssd 
+            topologyKey: kubernetes.io/hostname
+    ```
+
+#### Taints && Tolerations
+用于保证Pod不会被调度到不适合的Node上，Taint作用于Node，Toleration作用于Pod
+
+##### Taints
+
+```bash
+$ kubectl taint nodes node1 key1=value1:NoSchedule
+```
+
+Taint类型
+* NoSchedule：新的Pod不应该调度到该Node，不影响症状运行的Pod
+* PreferNoSchedule：新的Pod尽量不要调度到该Node
+* NoExecute: 新的Pod不应该调度到该Node，且驱逐已经运行的Pod
+
+##### Tolerations
+Pod可以设置是否容忍某些Taint，如果满足，则可以调度或者不被驱逐
+
+```yaml
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    imagePullPolicy: IfNotPresent
+  tolerations:
+  - key: "example-key"
+    operator: "Exists"
+    effect: "NoSchedule"
+```
+
+#### 调度优先级
+为Pod区分优先级，保证优先级高的Pod优先调度，或者在资源不足的时候区组低优先级的Pod从而获得调度资源
+
+* api-server配置 `--feature-gates=PodPriority=true` 和 `--runtime-config=scheduling.k8s.io/v1alpha1=true`
+* kube-scheduler配置 `--feature-gates=PodPriority=true`
+
+Priority Class
+定义Pod的优先级，定义该优先级的value，是否全局默认（globalDefault），以及是否可以被抢占（preemptionPolicy）
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+preemptionPolicy: Never
+globalDefault: false
+description: "This priority class should be used for XYZ service pods only."
+```
+
+在Pod中指定priority
+```yaml
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    imagePullPolicy: IfNotPresent
+  priorityClassName: high-priority
+```
+
+#### 自定义调度器
+默认使用DefaultScheduler进行调度，但如果默认调度器不满足需求，也可以自定义调度器，并且在PodSpec中指定期望的自定义调度器名称
+```yaml
+spec:
+  schedulerName: my-scheduler
+  containers:
+  - name: pod-with-default-annotation-container
+    image: registry.k8s.io/pause:2.0
+```
+
 
 ## Worker Node
 
 ### Kubelet
+每个worker节点都有运行一个kubelet服务进程，默认端口10250
+
 主要有一下职责：
 * 获取Pod list，按序启动或者停止Pod
 * 汇报Node的资源信息以及健康状态
 * Pod健康检查以及状态汇报
+
+架构：
+* Kubelet API
+    1. 探活
+    2. 业务指标上报
+* Managers
+    各个不同职责的控制器，如探活，OOM监控，磁盘空间管理，cAdvisor(基于cgroups技术获取节点上运行的资源情况)，syncLoop(接受Pod变化通知)，PodWorker(更新Pod)
+
+    > syncLoop接受来自API Server的Pod更新通知，将时间存放到UpdatePodOptions中（里面是多个queue）;
+    > 
+    > worker从queue中获取Pod事件的变更内容清单，然后针对每一个Pod进行syncPod的操作;
+    > 
+    > 调用CRI接口真正对Pod进行创建或更新；
+    >
+    > 通过PLEG组件上报Pod状态到syncLoop，再上报到api server
+* CRI
+
+#### Pod 管理
+* 获取Pod列表
+    1. 文件（静态Pod，集群启动的时候默认创建的Pod）
+    2. HTTP endpoint，启动参数配置`--manifest-url`，将清单放在url中，效果类似文件形式
+    3. API Server
+
+Kuberlet在启动容器进程的时候，是启动多个容器进程（即使PodSpec里面只是申明了一个容器）
+* pause
+    是一个sandbox进程，比所有业务容器都先被拉起，用于挂载network namespace，相当于每个业务容器的底座，业务容器发生问题也不会影响到Pod的网络配置，业务容器重启也无需重新配置网络。
+    pause启动之后，containerd会调用cni插件为Pod配置网络，配置完之后返回给运行时，运行时上报给kubelet，此时pod就有了IP
+    要查看pause，需要在worker节点中通过ctr进行查看
+    ```bash
+    $ ctr -n k8s.io c list | grep pause
+    0fd6a2572faf674484a1edca18b122810af9464057357d2d11ae3b37d61ae754    registry.aliyuncs.com/google_containers/pause:3.6             io.containerd.runtime.v1.linux    
+    1686d6b758b60cd7a55077706591bcb01c55e9e1ee09b430627f33a96c77aa66    registry.aliyuncs.com/google_containers/pause:3.6             io.containerd.runtime.v1.linux    
+    1c985ccc1b147746e8969cfa63540b248a7d029516f1bf2b9fc7e2f2130187a8    registry.aliyuncs.com/google_containers/pause:3.6             io.containerd.runtime.v1.linux    
+    301053269db503943fa30e07700353bfbdcc6c31db86546242b66953b2cf7204    registry.aliyuncs.com/google_containers/pause:3.6             io.containerd.runtime.v1.linux
+    ```
+Kubelet启动Pod的流程：
+    TODO
+    总体是CSI -> CRI -> CNI
+
+#### CRI
+container runtime interface，kubernetes定义的一组GRPC的服务
+包括两类服务：
+* 镜像服务
+    遵循OCI的Image Specification
+* 运行时服务
+    遵循OCI的Runtime Specification
+    1. CRI runtime：与kubelet交互
+    2. OCI runtime：与具体的容器运行时交互
 
 ### Kube Proxy
 监控集群中和用户发布的Service，并完成Load Balance的配置
