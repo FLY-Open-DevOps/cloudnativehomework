@@ -44,6 +44,18 @@ Version是v1beta
 * Pod
     一组容器的集合，Kubernetes中资源调度的基本单位，Pod中的容器共享网络namespace，通过挂载存储卷共享存储，共享Security Context
     Pod中不同容器可以通过loopback进行访问
+
+    Pod的生命周期
+    Pod的状态由`status.phase`和`status.conditions`计算出来的
+
+    如何保证Pod高可用：
+    * 设置合理的resource limit（内存和emptyDir），放置资源不足被evict
+
+    Pod的QOS（Quality of Service）
+    * Graranteed：一定需要指定资源才可以运行（仅设置resources.request或者resource.request = resource.limit）
+    * Burstable：仅需一定资源即可启动，但是设置最大可抢占资源数量，适用绝大多数场景（resource.request < resource.limit）
+    * Besteffort：不去设置resources，放任资源竞争
+
 * 存储卷
     * Volume：定义Pod的存储卷来源
     * VolumeMounts：挂载定义好的Volume到容器内部
@@ -57,6 +69,17 @@ Version是v1beta
         Pod启动时探测应用是否就绪
     3. StartupProbe
         Pod启动时探测应用是否完成启动，当一个应用需要较长的启动时间，则需要设置StartupProbe，让探活操作的间隔变长，放置过于频繁的探活使得应用没有机会启动成功。一旦应用启动成功，该Probe会失效，让Readiness Probe来接管
+    ReadinessGates
+        自定义的就绪条件，需要使用额外的控制器。以上所有探针都就绪了，它还没就绪时说明Pod依旧还没有就绪
+
+    两个hook
+    * PostStart
+        应用成功启动（成功进入entrypoint）后，做的一些事情，无法保证与entrypoint的执行先后顺序，但是poststart完成，container就会就绪
+    * PreStop
+        container被删除的时候可以插入的行为（如优雅终止的行为）
+
+    terminationGracePeriodSeconds
+    代表了整个grace period的时间长度，顺序是：prestop -> kill -SIGTERM -> kill -SIGKILL
 * ConfigMap
     应用配置信息
 * Secret
@@ -464,9 +487,210 @@ container runtime interface，kubernetes定义的一组GRPC的服务
     遵循OCI的Image Specification
 * 运行时服务
     遵循OCI的Runtime Specification
-    1. CRI runtime：与kubelet交互
-    2. OCI runtime：与具体的容器运行时交互
+    1. CRI runtime：与kubelet交互，如containerd，CRI-O等
+    2. OCI runtime：与具体的容器运行时交互，如runc，kata等
+
+#### CNI
+container network interface，kubernetes通过提供一个轻量级的通用的容器网络接口CNI，专门用于设置和删除容器的网络连通性，容器运行时通过CNI调用网络插件来完成容器的网络设置
+CNI的配置是通过直接调用二进制文件来执行的
+
+kubernetes网络模型的设计基本原则：
+1. 所有Pod无需NAT就能互相访问
+2. 所有节点无需NAT就能互相访问
+3. 容器内看见的IP地址和外部组件看到容器的IP是一致的
+
+##### CNI插件分类
+* IPAM: 分配IP地址
+* 主插件：网卡设置
+    * bridge
+    * ipvlan，和bridge一样，用于打通主机和容器的网络
+    * loopback
+    * 还有其它社区提供的，如Calico，Cilium等
+* Meta：附加功能
+    * portmap：设置主机与容器端口映射
+    * bandwidth：限流
+    * firewall：利用iptables或者firewalld为容器设置防火墙规则
+
+默认CNI配置路径`/etc/cni/net.d`, 一个CNI配置的例子：
+```json
+{
+    "cniVersion": "0.3.1",
+    "name": "crio",
+    "type": "bridge",
+    "bridge": "cni0",
+    "isGateway": true,
+    "ipMasq": true,
+    "hairpinMode": true,
+    "ipam": {
+        "type": "host-local",
+        "routes": [
+            { "dst": "0.0.0.0/0" },
+            { "dst": "1100:200::1/24" }
+        ],
+        "ranges": [
+            [{ "subnet": "10.85.0.0/16" }],
+            [{ "subnet": "1100:200::/24" }]
+        ]
+    }
+}
+```
+配置文件里面的type指明了CNI插件的名称，比如bridge，calico等
+
+##### 常见插件
+* Flannel
+    基于VxLAN，在原始数据报封装一层包头（overlay）去做转发，简单易用，但是效率不高，且流量跟踪比较困难
+* Calico
+    性能好，灵活，支持网络策略
+    DaemonSet的形式运行，主要组件有：
+    1. felix agent：配置防火墙规则
+    2. BIRD agent：BIRD是一个路由交换软件，将主机模拟为一个路由器，主机之间基于BGP协议交换路由信息
+    3. confd agent：用来进行配置推送
+
+    calico的模式：
+    * VXLan
+    * BGP
+
+    初始化：
+    由init container通过mount host path的形式将calico相关的二进制文件配置到Node中
+
+    所在的api group：`crd.projectcalico.org`
+
+    IP分配相关CRD
+    * IPPOOLS
+        定义CIDR
+    * IPAM Block
+        定义每台主机预分配的IP段，以及记录了哪个IP分配到了哪个Pod的信息，以及未分配的IP
+        ```bash
+        $ kubectl get ipamblock
+        ```
+    * IPAM Handler
+        记录了IP分配的详细信息
+
+##### 数据包流转
+[reference](https://dramasamy.medium.com/life-of-a-packet-in-kubernetes-part-2-a07f5bf0ff14)
+
+#### CSI
+> 插件管理的形式
+> * in-tree
+>     不再接受新的插件
+> * out-of-tree
+>     * FlexVolume
+>         需要root权限
+>     * CSI
+>         主流
+
+通过RPC调用形式与存储驱动进行交互
+
+结构：
+* 存储控制器
+    存储适配器
+    * provisioner： 创建volume
+    * attacher：挂载volume
+    CSI驱动
+
+* 工作节点
+    存储代理
+    * 节点驱动注册器
+    * CSI代理
+
+
+常见CSI：
+* 临时存储：
+    * emptyDir
+        与Pod生命周期强绑定，Pod一旦重建，则会被抹除
+* 半持久化：
+    * host path
+        永久持久化到工作节点的特定位置中
+
+    > host path可以以PV/PVC的形式暴露给终端用户
+    > 
+    > 1. 手工创建host path对应的StorageClass为manual的PV
+    >
+    > 2. 终端用户通过PVC去使用该PV(PV中的StorageClass需要与PV保持一致)
+
+* 永久存储相关的资源
+    1. StorageClass
+        定义provisioner以及mount的相关参数
+    2. Volume
+    3. Persistent Volume Claim
+        由用户创建，代表用户对存储的需求声明
+        定义StorageClass，存储大小，访问模式（读写相关）等
+    4. Persistent Volume
+        一般由集群管理员提前创建，或者根据PVC需求动态创建，代表后端的真实存储空间
+    
+##### Rook
+云原生环境下的开源分布式存储编排系统
+
+架构：
+* Rook Operator
+    负责拉去Rook其它组件，启动控制平面
+* Rook Discover
+    负责发现物理存储空间
+* Provisioner
+* Rook Agent
+    DaemonSet，处理所有存储操作，如mount存储卷到容器等
+
+
+
+
 
 ### Kube Proxy
+
+#### 负载均衡
+
 监控集群中和用户发布的Service，并完成Load Balance的配置
 
+网络包
+ - 三层：IP相关，IP header
+ - 四层：端口相关，TCP header
+ - 七层：应用协议相关，如HTTP header
+
+负载均衡
+- 集中式
+    主要是外部流量先通过集中式LB，再进入到集群中
+- 进程内
+    语言相关，强耦合
+- 独立进程
+
+相关技术
+- NAT
+    负载均衡器通过修改源和目标地址来控制数据包转发行为
+- 新建TCP连接
+    和NAT类似，不同的点是它会断掉源端的链接，再与对端建立新的链接
+- 链路层负责均衡
+    这种情况下负责均衡器和上游服务器要在同一个IP地址下，负责均衡器收到请求之后直接修改链路层MAC地址直接发送到对应的服务去
+- 隧道技术
+    在IP头外层增加额外的IP包头然后转发给上游，类似overlay
+
+#### Service相关对象
+
+- Endpoints
+    Endpoint controller监听service对象创建后，根据label selector，获取到对应的Pod IP的集合，记录到addresses属性中
+    1. 如果Pod not ready，加入的是`subnets.notReadyAddresses`，ready的Pod加入`subnets.addresses`
+    2. 如果配置了PublishNotReadyAddress为true，则无论是否ready都加入address中
+- Endpoint slice
+    高版本中kubernetes的一个针对endpoint做的性能优化
+    如果一个service背后的pod非常多（上千个级别），那么每次pod就绪或者生存状态发生变动的时候就要将整个很大的endpoint配置文件推送给kube-proxy，并且如果抖动情况发生频繁的时候，就会造成性能问题
+    Endpoint Slice将全部的Endpoint切分为若干个切片，每次变动的时候仅需要推送包含该变动的切片到kube-proxy即可，优化了性能
+
+> 如何为集群外面的一组服务配置service?
+>
+> 定义一个无label selector的service，然后认为创建endpoint/endpoint slice，在subset中填写集群外的IP或者域名
+
+- Service
+    1. Label Selector
+    2. Port转换
+
+    类型：
+    - clusterIP
+    - nodePort
+    - loadBalancer
+    - Headless Service
+    - ExternalName Service
+
+    Service Topology
+    kubernetes通过提供标签来表示节点的物理区域位置
+    Service可以引入topologyKey属性来进行流量控制
+    > TODO: Service的`spec.topologyKey`已经在1.22被停用，在高版本需要怎么做
+
+    
