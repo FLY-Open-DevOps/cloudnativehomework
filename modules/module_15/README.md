@@ -89,8 +89,72 @@ Version是v1beta
     对应用户账户，跨namespace
     2. Service Account
     运行中的程序的身份，与namespace是相关的
+
 * Service
+
     应用服务的抽象，通过label为应用提供服装均衡和服务发现
+
+    - 负载均衡
+        监控集群中和用户发布的Service，并完成Load Balance的配置
+
+        网络包
+        - 三层：IP相关，IP header
+        - 四层：端口相关，TCP header
+        - 七层：应用协议相关，如HTTP header
+
+        负载均衡
+        - 集中式
+            主要是外部流量先通过集中式LB，再进入到集群中
+        - 进程内
+            语言相关，强耦合
+        - 独立进程
+
+        相关技术
+        - NAT
+            负载均衡器通过修改源和目标地址来控制数据包转发行为
+        - 新建TCP连接
+            和NAT类似，不同的点是它会断掉源端的链接，再与对端建立新的链接
+        - 链路层负责均衡
+            这种情况下负责均衡器和上游服务器要在同一个IP地址下，负责均衡器收到请求之后直接修改链路层MAC地址直接发送到对应的服务去
+        - 隧道技术
+            在IP头外层增加额外的IP包头然后转发给上游，类似overlay
+
+    - Service相关对象
+        - Endpoints
+
+            Endpoint controller监听service对象创建后，根据label selector，获取到对应的Pod IP的集合，记录到addresses属性中
+
+            1. 如果Pod not ready，加入的是`subnets.notReadyAddresses`，ready的Pod加入`subnets.addresses`
+            2. 如果配置了PublishNotReadyAddress为true，则无论是否ready都加入address中
+
+        - Endpoint slice
+
+            高版本中kubernetes的一个针对endpoint做的性能优化
+
+            如果一个service背后的pod非常多（上千个级别），那么每次pod就绪或者生存状态发生变动的时候就要将整个很大的endpoint配置文件推送给kube-proxy，并且如果抖动情况发生频繁的时候，就会造成性能问题
+            Endpoint Slice将全部的Endpoint切分为若干个切片，每次变动的时候仅需要推送包含该变动的切片到kube-proxy即可，优化了性能
+
+        > 如何为集群外面的一组服务配置service?
+        >
+        > 定义一个无label selector的service，然后认为创建endpoint/endpoint slice，在subset中填写集群外的IP或者域名
+
+        - Service
+            1. Label Selector
+            2. Port转换
+
+            类型：
+            - clusterIP
+            - nodePort
+            - loadBalancer
+            - Headless Service
+            - ExternalName Service
+
+            Service Topology
+            kubernetes通过提供标签来表示节点的物理区域位置
+            Service可以引入topologyKey属性来进行流量控制
+            > TODO: Service的`spec.topologyKey`已经在1.22被停用，在高版本需要怎么做
+
+        
 * Replica Set
     控制Pod副本数
 * Deployment
@@ -636,61 +700,340 @@ kubernetes网络模型的设计基本原则：
 
 ### Kube Proxy
 
-#### 负载均衡
+每个worker node上都会运行一个kube proxy服务，负责监听api server中的service和endpoint的变化情况，通过iptables等来为服务配置负载均衡（仅TCP和UDP）
 
-监控集群中和用户发布的Service，并完成Load Balance的配置
+形式：直接运行在物理机 / static pod / DaemonSet
 
-网络包
- - 三层：IP相关，IP header
- - 四层：端口相关，TCP header
- - 七层：应用协议相关，如HTTP header
+实现方式：
+- userspace
+- iptables
+    完全基于iptables规则来实现service的负载均衡
+    用户态配置NAT表的规则，当要访问ClusterIP的地址的时候，数据包的转发到真实的后端Pod中
+- ipvs
+    解决iptables的性能问题，采用增量更新的形式保证service在更新的时候连接不会断开，一般情况推荐使用
+- winuserspace
+    windows环境下的实现
 
-负载均衡
-- 集中式
-    主要是外部流量先通过集中式LB，再进入到集群中
-- 进程内
-    语言相关，强耦合
-- 独立进程
 
-相关技术
-- NAT
-    负载均衡器通过修改源和目标地址来控制数据包转发行为
-- 新建TCP连接
-    和NAT类似，不同的点是它会断掉源端的链接，再与对端建立新的链接
-- 链路层负责均衡
-    这种情况下负责均衡器和上游服务器要在同一个IP地址下，负责均衡器收到请求之后直接修改链路层MAC地址直接发送到对应的服务去
-- 隧道技术
-    在IP头外层增加额外的IP包头然后转发给上游，类似overlay
 
-#### Service相关对象
+##### Netfilter框架
+Linux内核处理接受到的数据包的流转的框架，主要作用于网络层
+> 一个数据包通常关注的5元组：协议，源地址，源端口，目标地址，目标端口
 
-- Endpoints
-    Endpoint controller监听service对象创建后，根据label selector，获取到对应的Pod IP的集合，记录到addresses属性中
-    1. 如果Pod not ready，加入的是`subnets.notReadyAddresses`，ready的Pod加入`subnets.addresses`
-    2. 如果配置了PublishNotReadyAddress为true，则无论是否ready都加入address中
-- Endpoint slice
-    高版本中kubernetes的一个针对endpoint做的性能优化
-    如果一个service背后的pod非常多（上千个级别），那么每次pod就绪或者生存状态发生变动的时候就要将整个很大的endpoint配置文件推送给kube-proxy，并且如果抖动情况发生频繁的时候，就会造成性能问题
-    Endpoint Slice将全部的Endpoint切分为若干个切片，每次变动的时候仅需要推送包含该变动的切片到kube-proxy即可，优化了性能
+四表五链
+- 四表： raw，mangle，nat，filter
+- 五链：prerouting，input，forward，output，postrouting，这些都暴露了HOOK供用户配置特定规则
+    一般是prerouting和output两个HOOK对目标地址进行修改
 
-> 如何为集群外面的一组服务配置service?
->
-> 定义一个无label selector的service，然后认为创建endpoint/endpoint slice，在subset中填写集群外的IP或者域名
+外部数据包进入Linux的流程
+1. 网卡驱动接受到数据包，对CPU发起硬件中断，将数据包通过直接访问内存的形式复制到Kernal的某块内存空间中
+2. CPU发起软中断，调用softIRQ handler，将接收到的数据包构造城SK Buffer，SKB分为两部分：Header（五元组）+ Data，并将SKB交付到Netfilter框架
+3. Netfilter去用户态读取定义的iptables的规则来处理数据包
 
-- Service
-    1. Label Selector
-    2. Port转换
+#### Kube Proxy工作原理
 
-    类型：
-    - clusterIP
-    - nodePort
-    - loadBalancer
-    - Headless Service
-    - ExternalName Service
+##### iptables模式为例
 
-    Service Topology
-    kubernetes通过提供标签来表示节点的物理区域位置
-    Service可以引入topologyKey属性来进行流量控制
-    > TODO: Service的`spec.topologyKey`已经在1.22被停用，在高版本需要怎么做
+Kube Proxy调用iptables的命令生成转发规则（规则大致是如果数据包的目标ip是clusterIP就dnat到特定的某个podIP中）
+下面是一个具体实例，比如我们发布了一个三个Pod的服务，如下：
+```bash
+$ kubectl get pods -n cloudnative -owide
+NAME                                     READY   STATUS    RESTARTS   AGE     IP            NODE       NOMINATED NODE   READINESS GATES
+http-server-demo-dev-6c7678cdcb-kdrg7    1/1     Running   0          7m12s   172.17.0.14   minikube   <none>           <none>
+http-server-demo-dev-6c7678cdcb-vkdvk    1/1     Running   0          7m12s   172.17.0.12   minikube   <none>           <none>
+http-server-demo-dev-6c7678cdcb-wj6b2    1/1     Running   0          7m12s   172.17.0.13   minikube   <none>           <none>
 
-    
+$ kubectl get svc -n cloudnative
+NAME                    TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+http-server-demo-dev    ClusterIP   10.98.140.123   <none>        80/TCP    89s
+```
+
+通过iptables-save命令查看nat表下的规则，找到和CLUSTER-IP相关的规则
+```bash
+# 从prerouting开始，所有请求都强制需要经过KUBE-SERVICE链
+-A PREROUTING -m comment --comment "kubernetes service portals" -j KUBE-SERVICES
+
+# 从KUBE-SERVICE链中获得的数据包，对10.98.140.123为目标IP且端口为80时，执行规则KUBE-SVC-7MAVMYXEWSWTZO74
+-A KUBE-SERVICES -d 10.98.140.123/32 -p tcp -m comment --comment "cloudnative/http-server-demo-dev cluster IP" -m tcp --dport 80 -j KUBE-SVC-7MAVMYXEWSWTZO74
+
+# 以33%的概率命中第一条规则，转发到规则KUBE-SEP-I3FOTHZ2ZFHDEZEY
+-A KUBE-SVC-7MAVMYXEWSWTZO74 -m comment --comment "cloudnative/http-server-demo-dev -> 172.17.0.12:80" -m statistic --mode random --probability 0.33333333349 -j KUBE-SEP-I3FOTHZ2ZFHDEZEY
+# 以50%的概率命中第一条规则，转发到规则KUBE-SEP-VNYQZSEJHSR6FRJ3
+-A KUBE-SVC-7MAVMYXEWSWTZO74 -m comment --comment "cloudnative/http-server-demo-dev -> 172.17.0.13:80" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-VNYQZSEJHSR6FRJ3
+# 以上规则都不命中，作为兜底规则，100%转发到规则KUBE-SEP-A7FT4NOFGEXI2SSB
+-A KUBE-SVC-7MAVMYXEWSWTZO74 -m comment --comment "cloudnative/http-server-demo-dev -> 172.17.0.14:80" -j KUBE-SEP-A7FT4NOFGEXI2SSB
+
+# dnat到Pod 172.17.0.13:80
+-A KUBE-SEP-VNYQZSEJHSR6FRJ3 -p tcp -m comment --comment "cloudnative/http-server-demo-dev" -m tcp -j DNAT --to-destination 172.17.0.13:80
+# dnat到Pod 172.17.0.14:80
+-A KUBE-SEP-A7FT4NOFGEXI2SSB -p tcp -m comment --comment "cloudnative/http-server-demo-dev" -m tcp -j DNAT --to-destination 172.17.0.14:80
+# dnat到Pod 172.17.0.12:80
+-A KUBE-SEP-I3FOTHZ2ZFHDEZEY -p tcp -m comment --comment "cloudnative/http-server-demo-dev" -m tcp -j DNAT --to-destination 172.17.0.12:80
+```
+iptables的规则都是从上到下执行的，从上面的规则可以看出iptables的LB逻辑
+存在问题：
+- 当Pod的数量很大的时候，数据包需要hit非常多的规则，因此数据包的转发效率不高
+- iptables要刷新规则的时候，kube-proxy无法做增量检查，只能把规则清除掉从头开始写，因此刷新规则的资源消耗非常高
+因此在iptables的模式下，整个集群的规模不可以太大，service不能太多，service后面的pod也不能太多
+
+iptables模式下的service的cluster ip可以是一个不用绑定在任何设备上的虚拟ip，只是用来匹配PREROUTING的规则而已，不经过路由判定
+
+##### ipvs工作模式
+ipvs是LVS(linux virtual servivce)一部分
+
+ipvs是在INPUT和OUTPUT链上订制规则，因此此时service上的clusterIP必须是本机的一个有效IP（绑在当前节点的一个dummy设备上）
+
+从iptables模式切换为ipvs模式：
+```bash
+$ kubectl edit cm kube-proxy -n kube-system
+# set mode: "ipvs"
+# then remove the kube-proxy container to let it rebuild
+$ iptables --flush
+```
+
+查询使用ipvsadm，用法和iptables大致相同
+
+
+### DNS服务
+Kubernetes中负责集群内的DNS服务的是coreDNS，coreDNS负责监听Service和EndPoint的变化并配置DNS
+```bash
+$ kubectl get pods -n kube-system
+NAME                               READY   STATUS    RESTARTS       AGE
+coredns-565d847f94-mj9wk           1/1     Running   9 (21h ago)    28d
+
+$ kubectl get service -n kube-system
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE
+kube-dns   ClusterIP   10.96.0.10   <none>        53/UDP,53/TCP,9153/TCP   28d
+
+$ kubectl get deploy -n kube-system
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+coredns   1/1     1            1           28d
+```
+
+业务Pod进行域名解析的时候，就是从coreDNS中查询域名对应的IP的，业务pod中配置的dns server就是core dns
+```bash
+$ kubectl exec loki-0 -- cat /etc/resolv.conf
+nameserver 10.96.0.10
+search default.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
+
+$ kubectl get service -n kube-system
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE
+kube-dns   ClusterIP   10.96.0.10   <none>        53/UDP,53/TCP,9153/TCP   28d
+```
+可以看到业务pod中的nameserver配置的就是kube-dns的服务地址
+
+服务分类
+- 一般service
+    ClusterIP，nodePort，LoadBalancer类型的service都有api server分配的集群IP，coreDNS会为这些service创建`FQDN : IP`的A记录，PTR记录，以及为端口创建SRV记录
+    > A记录：从域名查IP
+    >
+    > PTR记录：从IP查域名
+    >
+    > SRV记录：端口相关的记录
+
+    kubernetes中FQDN的格式: `svcname.namespace.svc.clusterdomain`
+- Headless service
+    service中指定`spec.clusterIP:None`的时候该服务为无头服务
+    此时，api server不会为该service分配一个clusterIP，coreDNS为此类service创建多条A记录，每条A记录均是`FQDN : 其中一个Pod的IP`
+
+- External Service
+    此类service用来引用一个已经存在的域名，coreDNS为其创建一个CNAME记录指向目标域名
+
+域名解析流程：
+```bash
+$ kubectl exec loki-0 -- cat /etc/resolv.conf
+nameserver 10.96.0.10
+search default.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
+```
+
+`options ndots:5`表示当域名中的点的数量在`[0:4)`以内的时候，会尝试用`search`中的内容进行填充去，尝试找到一个能成功解析的域名
+比如`curl test`，就会尝试为test这个域名添加后缀`default.svc.cluster.local`，然后尝试去解析`test.default.svc.cluster.local`这个域名
+
+在Pod中的相关配置
+```yaml
+spec:
+  dnsPolicy: ClusterFirst #
+  enableServiceLinks: true # true的时候Service的一些信息会以环境变量的形式注入POD中，当集群规模较大的时候建议关闭，否则有可能因为Service信息太多导致POD启动不成功
+```
+
+可以为Pod指定`/etc/resolv.conf`的内容，也就是DNS的解析策略
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+spec:
+  containers:
+    - name: my-container
+      image: my-image:tag
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+      - 8.8.8.8
+    searches:
+      - my-domain.local  # Specify search domains here
+    options:
+      - name: ndots
+        value: "5"  # Set the value for the ndots option
+```
+
+### Ingress
+Service的负载均衡主要工作在L4，Ingress的负载均衡主要工作在L7，本质上就是一个反向代理的软件，如Nginx，Envoy等
+
+Ingress职责：
+- 在Ingress层集中管理证书，以及集群外部的请求的TLS termination工作是在这一层进行的
+- 分析用户的request url的path和request header中的一些属性，决定这个请求要被转发到Ingress背后的哪个service中
+
+Ingress Controller
+- 负责生成相应的反向代理软件的相关配置
+- 一个集群中可能运行着多个Ingress Controller，在创建Ingress对象的时候需要指定`spec.ingressClassName`为Ingress controllr的名字来选择生成不同软件的转发配置
+
+# 生产集群管理
+## OS选择
+> TODO
+
+## 节点资源管理
+
+- 状态上报
+Kubelet通过[Lease](https://kubernetes.io/docs/concepts/architecture/leases/)对象向API server汇报自身的健康状态，如果超过nodeLeasesDurationSeconds（默认40s）没有更新状态，则节点会被判定为不健康
+
+查看节点lease信息：
+```bash
+$ kubectl get lease -n kube-node-lease minikube -oyaml
+```
+```yaml
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  creationTimestamp: "2023-07-20T13:20:15Z"
+  name: minikube
+  namespace: kube-node-lease
+  ownerReferences:
+  - apiVersion: v1
+    kind: Node
+    name: minikube
+    uid: f36c7602-3b2f-4384-ba96-1beda127c62d
+  resourceVersion: "280880"
+  uid: 7caf27f1-5f00-4684-a5c0-0fec005c9e85
+spec:
+  holderIdentity: minikube
+  leaseDurationSeconds: 40
+  renewTime: "2023-08-18T09:38:57.963829Z"
+```
+
+查看节点的健康信息：
+```bash
+$ kubectl get nodes -oyaml
+```
+关注以下内容：
+```yaml
+status:
+  conditions:
+  - lastHeartbeatTime: "2023-08-18T09:30:39Z"
+    lastTransitionTime: "2023-08-16T14:32:01Z"
+    message: kubelet has sufficient memory available
+    reason: KubeletHasSufficientMemory
+    status: "False"
+    type: MemoryPressure
+  - lastHeartbeatTime: "2023-08-18T09:30:39Z"
+    lastTransitionTime: "2023-08-16T14:32:01Z"
+    message: kubelet has no disk pressure
+    reason: KubeletHasNoDiskPressure
+    status: "False"
+    type: DiskPressure
+  - lastHeartbeatTime: "2023-08-18T09:30:39Z"
+    lastTransitionTime: "2023-08-16T14:32:01Z"
+    message: kubelet has sufficient PID available
+    reason: KubeletHasSufficientPID
+    status: "False"
+    type: PIDPressure
+  - lastHeartbeatTime: "2023-08-18T09:30:39Z"
+    lastTransitionTime: "2023-08-16T14:32:01Z"
+    message: kubelet is posting ready status
+    reason: KubeletReady
+    status: "True"
+    type: Ready
+```
+
+- 资源预留
+    为Kubernetes的基础服务预留CPU，内存，PID等资源，保证集群正常工作，相关参数`SystemReserved`，`KubeReserved`等
+    查询节点的资源预留情况
+    ```bash
+    $ kubectl get nodes -oyaml
+    ```
+    查看以下内容：
+    ```yaml
+    status:
+    allocatable:
+        cpu: "6"
+        ephemeral-storage: 80698128Ki
+        hugepages-1Gi: "0"
+        hugepages-2Mi: "0"
+        memory: 12221572Ki
+        pods: "110"
+    capacity:
+        cpu: "6"
+        ephemeral-storage: 80698128Ki
+        hugepages-1Gi: "0"
+        hugepages-2Mi: "0"
+        memory: 12221572Ki
+        pods: "110"
+    ```
+    capacity指整个节点拥有的计算资源
+    allocatable指节点可以分配给其它作业的计算资源
+
+    节点Capacify包括以下内容：
+    - kube-reserved
+    - system=reserved
+    - eviction-threshold
+        需要启动驱逐行为的资源消耗阈值
+    - allocatable
+
+    节点磁盘管理
+    > TODO
+
+- 驱逐管理
+    当节点资源紧张的时候，kubelet回去驱逐一些Pod，但是不是删除Pod，而是只是终止了Pod中的容器进程，留下驱逐的痕迹
+
+    驱逐策略
+    - evictionSoft：满足条件，等待一个宽限期，如果宽限期到了还是满足条件，则采取驱逐行为，并且给pod优雅终止的机会
+    - evictionHard: 满足条件，直接驱逐，直接使用杀死Pod中的容器
+    主要配置在kubelet启动的时候的`--config`中的配置文件决定，默认路径是`/var/lib/kubelet/config.yaml`
+    ```yaml
+    evictionHard:
+        imagefs.available: 0%
+        nodefs.available: 0%
+        nodefs.inodesFree: 0%
+    ```
+
+## 配置高可用集群
+- KubeSpary
+    > TODO
+
+- ClusterAutoScaler
+    > TODO
+
+
+# 生产化运维
+
+## 镜像相关
+
+### 镜像仓库
+Harbor搭建进行仓库
+> TODO
+
+### 镜像anquan
+> TODO
+
+## DevOps
+为每个微服务设置一个总负责人，需要为应用的全生命周期负责。
+一个应用ready，需要包括以下内容：
+- function ready，业务功能完善
+- prodution ready
+    - 通过负载与压力测试
+    - 完成用户手册
+    - 完成管理手册，可以按照管理手册部署与升级服务
+
+
