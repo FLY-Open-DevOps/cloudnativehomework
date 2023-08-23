@@ -966,20 +966,20 @@ status:
     查看以下内容：
     ```yaml
     status:
-    allocatable:
-        cpu: "6"
-        ephemeral-storage: 80698128Ki
-        hugepages-1Gi: "0"
-        hugepages-2Mi: "0"
-        memory: 12221572Ki
-        pods: "110"
-    capacity:
-        cpu: "6"
-        ephemeral-storage: 80698128Ki
-        hugepages-1Gi: "0"
-        hugepages-2Mi: "0"
-        memory: 12221572Ki
-        pods: "110"
+        allocatable:
+            cpu: "6"
+            ephemeral-storage: 80698128Ki
+            hugepages-1Gi: "0"
+            hugepages-2Mi: "0"
+            memory: 12221572Ki
+            pods: "110"
+        capacity:
+            cpu: "6"
+            ephemeral-storage: 80698128Ki
+            hugepages-1Gi: "0"
+            hugepages-2Mi: "0"
+            memory: 12221572Ki
+            pods: "110"
     ```
     capacity指整个节点拥有的计算资源
     allocatable指节点可以分配给其它作业的计算资源
@@ -1028,12 +1028,363 @@ Harbor搭建进行仓库
 > TODO
 
 ## DevOps
-为每个微服务设置一个总负责人，需要为应用的全生命周期负责。
+
 一个应用ready，需要包括以下内容：
 - function ready，业务功能完善
 - prodution ready
     - 通过负载与压力测试
     - 完成用户手册
     - 完成管理手册，可以按照管理手册部署与升级服务
+    - 监控
+        - 组件健康检查
+        - 性能指标（Metrics）
+        - 基于性能指标定义alert rule
+        - 定期测试某功能
 
 
+## CICD
+
+### Github Action
+基于Github的Action构建流水线
+
+[文档](https://docs.github.com/en/actions)
+
+### Jenkins
+基于脚本配置流水线
+有以下问题
+- 复用率不足
+- 代码调试较为困难
+
+### Tekton
+声明式API的流水线，[文档](https://tekton.dev/docs/)
+
+核心组件：
+- Pipeline
+    每个Pipeline由一个或者数个Task组成
+- Task
+    Kubernetes为每一个Task创建一个Pod，一个Task由多个Step组成，每个Step是Pod中的一个容器
+
+> pipeline和task对象可以接受git registry, PR等资源作为输入，可以将Image，Kubernetes Cluster，Storage，CloudEvent作为输出
+
+EventListener
+核心属性是interceptors拦截器，可以监听多种事件类型，比如GitLab的Push事件。当EventListener对象被创建以后，Tekton的controller会为该EventListener创建Kubernetes的Pod和Service，启动一个http服务监听Push事件。当用户在GitLab中设置webhook填写EventListener服务地址后，针对该项目的Push操作都会被EventListenner捕获
+
+
+### Argo CD
+- 用于Kubernetes的声明式GitOps的连续交付工具
+- 实现是基于Kubernetes的controller。该控制器连续监视症状运行中的aoo，并将当前的活动状态和所需的目标状态（Git repo中指定）进行比较，当活动状态偏离目标状态的已部署app会被标记为OutOfSync
+- 报告可视化差异，提供自动或者手动将实时状态同步回所需要的目标状态
+* 对Git repo中对目标状态做的修改都可以自动应用并反映到所指定的目标环境宏
+
+## 日志
+Grafana Loki
+
+架构：
+- Loki
+    日志处理与持久化
+    - Distributor
+        - 处理客户端谢日的日志
+        - 接收到日志后分批发送给多个Ingester
+    - Ingester
+        日志数据持久化（DynamoBD，S3等）
+        保证日志顺序
+    - Querier
+        基于LogQL
+- Promtail
+    Pod日志搜集，并为日志打上相关Pod的label
+- Grafana
+    展示与查询
+
+## 监控
+Prometheus
+
+每个节点的Kubelet（继承了cAdvisor）会收集当前节点host上所有信息，包括cpu，内存，磁盘的等，Prometheus会pull这些信息，并给每个Node打上标签来区分不同的Node的信息
+
+Kubernetes的control panel，包括各种controller都原生地暴露了Prometheus格式的metrics
+
+- 架构
+    - Prometheus Server
+        - Retriveval：采集指标
+        - TSDB：存储指标
+            - 特性
+                纵向写：每一次数据采集，都会汇报周期内的所有指标数据
+                横向读：按特定的序列读取，单调时间序列 = Metrics Name + 唯一的labels
+            - 存储机制
+                - 内存
+                - 磁盘
+                - WAL，write ahead log
+            - 索引
+                - 每个时间序列都有一个唯一ID
+                - 索引模块维护了一个label和ID的map关系
+                - 通过K路轮询完成时间序列的高效查询
+            
+        - Http server：查询与展示数据
+    - PushGateway
+        对于job程序可以将指标统一推送到pushgateway，再由Retriveval统一采集
+    - AlertManager
+        配置告警规则
+
+- 数据模型
+    - metrics name 和 labels
+        metrics name：指标名称，如cpu_rate
+        label：为指标打上标签，方便查询的时候缩减查询范围
+    - samples
+        每一次采集收集到的采用数据由两部分组成：
+        - TimeStamp
+        - Value
+
+    - 指标表示方式
+        - OpenTSDB的表示方式
+            `<metrics name>{<label name>=<label value>, ...}`，如`api_http_requests_total{method="POST", handler="/messages"}`
+
+
+
+- 指标类型
+    - Counter：计数器，只增不减
+    - Gauge：仪表盘，可增可减
+    - Histogram：直方图，最重要的指标，范围时间内对数据进行采样，将其计入可配置的存储桶（提前将可能出现的数值范围进行分段， 均分或者不均分）中，然后按桶来统计出现的频率
+    - Summary：摘要，在直方图的基础上，直接统计特定区间的计数
+
+- PromQL
+    Prometheus中用于查询数据的语言
+    常用：
+    ```pql
+    histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+    ```
+    表示95%的请求在5min内，在不同响应事件区间的处理的数量的变化情况
+    
+    更多PQL相关信息：[参考](https://prometheus.io/docs/prometheus/latest/querying/basics/)
+
+
+- 如何在Kubernetes中使用给Prometheu暴露上报指标？
+    1. web server应用需要暴露接口`/metrics`来上报指标信息
+        ```go
+        func register() {
+            http.Handle("/metrics", promhttp.HandlerFor(
+                registry,
+                promhttp.HandlerOpts{
+                    EnableOpenMetrics: true,
+                }),
+            )
+        }
+        ```
+    2. 在Pod Template中需要申明上报指标的端口和地址
+        ```yaml
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+            name: http-server-demo
+        spec:
+            replicas: 1
+            selector:
+                matchLabels:
+                app: http-server-demo
+            template:
+                metadata:
+                    labels:
+                        app: http-server-demo
+                    annotations:
+                        prometheus.io/port: server-port
+                        prometheus.io/scrape: "true"
+                spec:
+                    containers:
+                        - name: http-server-demo
+                        ports:
+                            - name: server-port
+                            containerPort: 80
+        ```
+
+展示监控数据：
+- Prometheus Server自带的Dashboard
+- Grafana Dashboard
+    配置Grafana Dashboard，可以自行定义自己需要的Dashboard，也可以直接使用社区定义好的通用的Dashboard，具体做法是先去社区查找需要的Dashboard的id，然后到grafana dashboard创建界面输入id进行导入
+    [Grafana实战](https://zhuanlan.zhihu.com/p/580145725)
+
+配置[告警](https://prometheus.io/docs/alerting/latest/overview/)
+
+- Thanos
+当集群规模较大的时候，可以将单个集群的Prometheus汇报的指标汇总到Thanos中，通过sidecar的形式采集集群中Prometheus的数据然后集中汇报
+[官网](https://thanos.io/)
+
+
+# 应用迁移
+
+## Helm
+Kubernetes的包管理器，更多[细节](https://helm.sh/)
+
+### 特性
+- Helm chart：一个应用实例的必要配置组和，一堆的spec
+- 配置信息分为Template和Value，使用这些信息进行渲染，生成最终的对象
+- 所有配置可以打包到一个可发布的对象中
+- release：一个带有特定配置的Helm chart实例
+
+### 组件
+- Helm client
+    - 进行本地chart开发与打包压缩文件
+    - 管理repository，获取与推送chart
+    - 管理release
+    - 与liabray交互
+        - 发送需要安装的chart
+        - 请求升级或者卸载存在的chart
+- Helm libaray
+    - 与API Server进行交互
+        1. 基于chart和configuration创建一个release
+        2. 把chart安装到kubernetes集群中，并提供相应的release对象
+        3. 升级和卸载
+        4. Helm采用Kubernetes存储所有配置信息，无需自己的数据库
+
+### 常用指令
+- helm create：创建新的chart
+- helm install：安装chart
+- helm package：将chart打包为压缩文件
+- helm repo 
+    - list：查看已经安装的社区repo
+    - add: 添加repo
+    - update
+- helm search `repo/hub`：查找社区存在的chart
+- helm pull：拉取chart
+- helm upgrade
+
+## Metrics Server
+
+- Metrics Server是Kubernetes监控体系的核心组件之一
+- 负载从Kubelet收集资源指标，对这些监控数据进行聚合（依赖kube-aggregator），并在Kubernetes ApiServer中通过Metrics API(`/apis/metrics.k8s.io/`)公开暴露它们。但是metrics-server只会存放最新的指标数据(CPU/Memory)
+- 主要是为了驱动集群的弹性伸缩的能力（如HPA）
+- 以Aggregated APIServer的形式运行
+
+如何知道特定Group和Version的组合是哪个本地服务还是Aggregate响应的：
+```bash
+$ kubectl get apiservice
+NAME                                   SERVICE                      AVAILABLE   AGE
+v1.                                    Local                        True        33d
+v1.admissionregistration.k8s.io        Local                        True        33d
+v1.apiextensions.k8s.io                Local                        True        33d
+v1beta1.metrics.k8s.io                 kube-system/metrics-server   True        3m14s
+
+$ kubectl get svc -n kube-system
+NAME             TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)                  AGE
+kube-dns         ClusterIP   10.96.0.10       <none>        53/UDP,53/TCP,9153/TCP   33d
+metrics-server   ClusterIP   10.109.228.178   <none>        443/TCP                  7m30s
+```
+SERVICE列显示local表示为原生的api server进行响应，上面结果说明group是`metrics.k8s.io`和version是`v1beta1`的资源会交由`kube-system/metrics-server`这个service进行处理
+
+如何查看节点或者Pod的负载情况：
+```bash
+$ kubectl top nodes
+NAME       CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%   
+minikube   554m         9%     1350Mi          11% 
+
+$ kubectl top pod loki-grafana-878b5cc5-thfb6
+NAME                          CPU(cores)   MEMORY(bytes)   
+loki-grafana-878b5cc5-thfb6   2m           95Mi     
+
+$ kubectl top pod loki-grafana-878b5cc5-thfb6
+NAME                          CPU(cores)   MEMORY(bytes)   
+loki-grafana-878b5cc5-thfb6   2m           95Mi     
+```
+
+# 弹性能力
+
+## HPA
+
+
+`apiVersion: autoscaling/v2`
+
+概念：
+- Horizontal Pod AutoScaler，依赖于Metrics Server，根据某些指标在statefulSet，replicaSet，deployments等集合中的Pod数量进行横向动态伸缩
+- 多个冲突的HPA规则应用到同一个应用的时候可能会造成无法预期的行为，需要小心维护
+
+查看HPA：
+```bash
+$ kubectl get hpa
+```
+
+配置样例：
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: php-apache
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: php-apache
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
+  - type: Pods
+    pods:
+      metric:
+        name: packets-per-second
+      target:
+        type: AverageValue
+        averageValue: 1k
+  - type: Object
+    object:
+      metric:
+        name: requests-per-second
+      describedObject:
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        name: main-route
+      target:
+        type: Value
+        value: 10k
+```
+
+算法细节：
+ `期望副本数 = ceil(当前副本数 * (当前指标 / 期望指标))`
+ 
+ - 如CPU的当前用量是200m，目标值是100m，那么期望副本数就是`当前副本数 * 200 / 100`，意味着当前副本数需要翻倍；
+ - 如CPU的当前用量是50m，目标值是100m，那么期望副本数就是`当前副本数 * 50 / 100`，意味着当前副本数需要减半；
+    
+容忍值：
+    `--horizontal-pod-autoscaler-tolerance`
+
+    如果计算出来的扩缩比例接近1.0，那么根据容忍值的配置（默认0.1），在(1.0 - tolerance, 1.0 + tolerance)的范围内会放弃本次扩缩操作
+
+冷却/延迟支持：
+    `--horizontaol-pod-autoscaler-downscale-stablilization`
+
+- 当使用HPA管理副本扩缩容时，可能会因为指标动态变化造成副本数量频繁变化，称为抖动（Thrashing）
+- 通过设置缩容冷却时间窗口长度，HPA可以记住过去建议的负载规模，并进队此时间窗口内进行最大规模次数的操作（默认5min）
+
+    
+扩容策略：`spec.behavior`
+
+为了保证扩缩容操作可以平滑执行
+
+配置样例：
+```yaml
+behavior:
+  scaleDown:
+    policies:
+    - type: Pods
+      value: 4
+      periodSeconds: 60
+    - type: Percent
+      value: 10
+      periodSeconds: 60
+```
+
+通过配置behavior来设定：
+- 单位时间内，最多只能伸缩特定个数的Pod或者特定比例的Pod数量
+
+存在的问题：
+- 基于指标的弹性有滞后性，因为弹性控制器的操作链路很长，从应用负载超出阈值到HPA完成扩容之间的时间差包括：
+    - 应用指标数值已经超出阈值
+    - HPA定期执行手机指标的滞后
+    - HPA 控制Deployment扩容的时间
+    - Pod调度的时间
+    - 应用启动到达服务就绪的时间
+
+很可能突发流量出现时，还没完成扩容，现有的服务实例就已经被击垮
+
+## VPA
