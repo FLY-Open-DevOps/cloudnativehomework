@@ -1706,3 +1706,366 @@ Istio控制平面：
         -A ISTIO_IN_REDIRECT -p tcp -j REDIRECT --to-ports 15006
         ```
         数据包在PREROUTING阶段就被捕获到ISTIO_INBOUND中，然后除了特定的port以为都走到最后一条，直到ISTIO_IN_REDIRECT转到15006这个虚IP的listener，再根据目标端口转到对应的端口的listener，解析cluster之后发现是自己，然后就通过loopback直接localhost发到Pod中的业务容器进程中
+
+### CRD
+
+> 一个请求进入istio集群，首先进入到Gateway进行域名匹配，如果匹配成功，则转入VirtualService，在转至对应的cluster（service），再到对应的pod中进行处理
+
+#### VirtualService
+在mesh中定义路由规则，控制路由如何路由到服务上
+
+一个典型的配置：
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: httpsserver
+spec:
+  gateways:
+    - httpsserver
+  hosts:
+    - httpsserver.cncamp.io
+  http:
+    - match:
+        - port: 443
+      route:
+        - destination:
+            host: httpserver.securesvc.svc.cluster.local
+            port:
+              number: 80
+```
+- spec.hosts：域名匹配，实际会转为envoy的domain filter配置
+- spec.gateways：指定使用的gateway的名称，见下面的gateway
+- spec.http：实际的规则配置，包括端口，以及对应的istio cluster（也就是kubernetes的service）
+
+基于url的path匹配不同的service，并重新path
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: simple
+spec:
+  gateways:
+    - simple
+  hosts:
+    - simple.cncamp.io
+  http:
+  - match:
+    - uri:
+        exact: "/simple/hello"
+    rewrite:
+      uri: "/hello"
+    route:
+      - destination:
+          host: simple.simple.svc.cluster.local
+          port:
+            number: 80
+  - match:
+    - uri:
+        prefix: "/nginx"
+    rewrite:
+      uri: "/"
+    route:
+      - destination:
+          host: nginx.simple.svc.cluster.local
+          port:
+            number: 80
+```
+与上面的VirtuaService使用Port进行匹配不同，这里使用了uri作为匹配依据，并将流量转入不同的cluster中，并在转入的时候将uri的path进行重写。
+上面的例子中，如果外部请求为`/simple/hello`，则转入到`simple.simple.svc.cluster.local`对应的service和pod中，并且pod中看到的请求的路径为`/hello`。
+还有其它的匹配规则，如headers，来自与同一集群的pod的请求的pod label等
+
+
+服务之间的分拆流量见DestinationRule
+
+超时配置：spec.http[n].timeout
+
+重试配置：spec.http[n].retries
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: ratings-route
+spec:
+  hosts:
+  - ratings.prod.svc.cluster.local
+  http:
+  - route:
+    - destination:
+        host: ratings.prod.svc.cluster.local
+        subset: v1
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: gateway-error,connect-failure,refused-stream
+
+```
+
+错误注入：spec.http[n].fault:
+- delay: 按一定的比例延迟某些请求，模拟网络阻塞
+    ```yaml
+        fault:
+        delay:
+            percentage:
+            value: 0.1
+            fixedDelay: 5s
+    ```
+- abort：按一定的比例返回错误，模拟服务错误
+    ```yaml
+        fault:
+        abort:
+            percentage:
+            value: 0.1
+            httpStatus: 400
+    ```
+
+流量镜像：spec.http[n].mirror
+mirror规则可以使得envoy截取所有request，在转发的同时，将request同时转发到mirror版本，并且在header的`Host/Authority`加上`-shadow`。这些mirror请求所有的response都会被丢弃
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: httpsserver
+spec:
+  gateways:
+    - httpsserver
+  hosts:
+    - httpsserver.cncamp.io
+  http:
+    - match:
+        - port: 443
+      route:
+        - destination:
+            host: httpserver.securesvc.svc.cluster.local
+            port:
+              number: 80
+      mirror:
+        host: httpserver.securesvc.svc.cluster.local
+        subset: v2
+      mirrorPercentage: 10.0
+```
+
+规则委托：spec.http[n].delegate
+如果规则内容非常复杂的时候，为了保持VirtualService对象的整洁，将规则内容写道另一个VirturalService中。
+
+比如我们有一个VirtualService如下：
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: bookinfo
+spec:
+  hosts:
+  - "bookinfo.com"
+  gateways:
+  - mygateway
+  http:
+  - match:
+    - uri:
+        prefix: "/productpage"
+    delegate:
+       name: productpage
+       namespace: nsA
+```
+里面声明了一个delegate是nsA.productpage，那么这条规则我就可以写到另一个VirtualService中
+```yaml
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: productpage
+  namespace: nsA
+spec:
+  http:
+  - match:
+     - uri:
+        prefix: "/productpage/v1/"
+    route:
+    - destination:
+        host: productpage-v1.nsA.svc.cluster.local
+  - route:
+    - destination:
+        host: productpage.nsA.svc.cluster.local
+
+```
+
+如果一个目标有多个规则的时候，则顺序越靠前优先级越高，因此，匹配度高的规则应该尽量放在后面作为兜底，否则一些特定的规则就会匹配不到
+
+
+#### Gateway
+HTTP/TCP流量配置负载均衡器，常见于mesh的边缘的操作，以启用应用程序的入口流量，需要与`VirtualService`进行绑定，对应的是一个listener
+一个典型的配置：
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: httpsserver
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - hosts:
+        - httpsserver.cncamp.io
+      port:
+        name: https-default
+        number: 443
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: cncamp-credential
+```
+
+- spec.selector.istio：
+    
+    在istio-system的ns下面的ingerssgateway的pod中存在label `istio: ingressgateway`，这个pod里面运行着一个具体的envoy实例，这个selector配置的主要是要将配置推送到哪个envoy的实例中
+    ```yaml
+    # kubectl get pods -n istio-system istio-ingressgateway-67c77cfc47-jznz9 -o yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+        creationTimestamp: "2023-08-07T04:38:30Z"
+        generateName: istio-ingressgateway-67c77cfc47-
+        labels:
+            istio: ingressgateway # this label
+        name: istio-ingressgateway-67c77cfc47-jznz9
+    .
+    .
+    .
+    ```
+    如何获取ingressgateway中的envoy全部配置：
+    ```bash
+    $ kubectl exec -it -n istio-system istio-ingressgateway-67c77cfc47-jznz9 -- bash
+    istio-proxy@istio-ingressgateway-67c77cfc47-jznz9:/$ curl localhost:15000/config_dump 
+    ```
+
+- spec.servers[0].hosts：域名匹配
+
+
+#### DestinationRule
+用来配合VirtualService对流量按权重进行拆分
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-route
+spec:
+  hosts:
+  - reviews.prod.svc.cluster.local
+  http:
+  - name: "reviews-v2-routes"
+    match:
+    - uri:
+        prefix: "/wpcatalog"
+    - uri:
+        prefix: "/consumercatalog"
+    rewrite:
+      uri: "/newcatalog"
+    route:
+    - destination:
+        host: reviews.prod.svc.cluster.local
+        subset: v2
+  - name: "reviews-v1-route"
+    route:
+    - destination:
+        host: reviews.prod.svc.cluster.local
+        subset: v1
+```
+上面的VirtualService定义了2个destination，为每个destination分别设定了不同的subset，但是指向的是同一个cluster地址，
+此时我们需要定义一个DestinationRule来配合subset字段：
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews-destination
+spec:
+  host: reviews.prod.svc.cluster.local
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_REQUEST
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+```
+在destination rule中声明了subset v1指的是Pod label是`version: v1`的pod，v2指的是`version: v2`的pod
+
+
+- 路由策略：spec.trafficPolicy：
+
+    - 负载均衡：spec.trafficPolicy.loadBalancer
+        ```yaml
+        loadBalancer:
+            simple: LEAST_REQUEST
+        ```
+        更多策略详见[官网](https://istio.io/latest/docs/reference/config/networking/destination-rule/#LoadBalancerSettings-SimpleLB)
+
+    - 断路器：spec.trafficPolicy.outlierDetection
+        ```yaml
+        outlierDetection:
+            consecutive5xxErrors: 7
+            interval: 5m
+            baseEjectionTime: 15m
+        ```
+        表示upstream单位hi贱内返回多少个特定类型的错误的话就将该ip从cluster剔除特定时间
+
+
+#### ServiceEntry
+定义集群以外的服务的入口，对istio来说，service entry和service是等价的，都会被纳入cluster进行管理
+
+#### WorkloadEntry
+定义一个具体的服务的ip地址和label等元数据，配合ServiceEntry管路集群外服务
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: WorkloadEntry
+metadata:
+  name: details-vm-1
+spec:
+  serviceAccount: details
+  address: 2.2.2.2
+  labels:
+    app: details
+    instance-id: vm1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: details-svc
+spec:
+  hosts:
+  - details.bookinfo.com
+  location: MESH_INTERNAL
+  ports:
+  - number: 80
+    name: http
+    protocol: HTTP
+  resolution: STATIC
+  workloadSelector:
+    labels:
+      app: details
+```
+上面的workloadEntry由于打上了label `app: details"`，因此service entry可以通过`spec.workloadSelector`选中符合条件的workload进行管控
+
+### Telemetry
+Istio有基本的Metrics上报能力（基于Envoy），如果有定制需求，需要使用其提供的CRD
+
+### 多集群Mesh扩展
+
+- 两个集群不能互通：基于Gateway去做转发
+
+- 两个集群可以互通：Primary-Remote模式，在主集群安装完整的Istio平面，在其它集群安装istio-remote
+
+### Tracing
+追踪原理：应用从request中收集特定的header，在请求fan out的时候将这些特定的header装到请求的header中：
+- x-request-id
+- x-b3-traceid
+- x-b3-spanid
+- x-b3-parentspanid
+- x-b3-sampled
+- x-b3-flags
+- b3
+- x-ot-span-context
+- traceparent
+- tracestate
+详见[这里](https://istio.io/latest/about/faq/distributed-tracing/)
